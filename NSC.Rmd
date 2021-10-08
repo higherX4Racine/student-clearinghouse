@@ -1,0 +1,233 @@
+---
+title: Grad Rates Data from DPI
+author: Ben Taft
+date: \today
+---
+
+```{r setup, include=FALSE}
+
+library(tidyverse)
+source("../R/color_palette.R")
+source("../R/lubridate_helpers.R")
+source("../R/student_status.R")
+
+theme_set(theme_minimal())
+theme_update(legend.position=c(0.8, 0.8),
+             panel.grid=element_blank())
+
+nsc_fields <- read_csv("NSC Students Fields.csv")
+nsc_enroll_status <- read_csv("nsc enrollment statuses.csv")
+nsc_class_levels <- read_csv("nsc class levels.csv")
+
+nsc <- read_csv("NSC Students Table.csv",
+                col_types=paste(nsc_fields$Format,
+                                collapse=""))
+
+nsc <- nsc %>%
+    mutate(`Enrollment Status`=factor(`Enrollment Status`,
+                                      levels=nsc_enroll_status$Value),
+           `Class Level`=factor(`Class Level`,
+                                levels=nsc_class_levels$Value),
+	       Duration=elapsed(`Enrollment Begin`,
+		                    `Enrollment End`,
+							"weeks"))
+
+```
+
+## Field Names in the Raw Data
+
+```{r field_names_table }
+
+print(names(nsc))
+
+```
+
+```{r wrangle_tables, include=FALSE}
+
+schools <- nsc %>%
+    select(`College Code/Branch`,
+           `College Name`,
+           `College State`,
+		   `Branch`,
+           `2-year / 4-year`,
+           `Public / Private`) %>% 
+    group_by(`College Code/Branch`,
+             `College Name`,
+			 `Branch`,
+             `College State`,
+             `2-year / 4-year`,
+             `Public / Private`) %>%
+    summarize() %>%
+    ungroup()
+
+institutions <- read_csv("college translations.csv")
+
+schools <- left_join(schools,
+                     institutions)
+
+students <- nsc %>%
+    select(`student unique id`:`grad date`) %>%
+    group_by(`ID`,
+             `Location`,
+             `Status`,
+             `Degree Type`,
+             `initials`,
+             `grad date`) %>%
+    summarize() %>%
+    ungroup()
+
+nsc_sequences <- nsc %>%
+     group_by(ID,
+              `College Sequence`,
+              `College Code/Branch`) %>%
+     summarize(`grad date`=max(`grad date`, na.rm=TRUE),
+               Start=min(`Enrollment Begin`,
+                         na.rm=TRUE),
+	           `Gap Time`=elapsed(`grad date`, 
+			                      Start,
+								  "years"),
+               Finish=max(`Enrollment End`,
+                          `Graduation Date`,
+                          na.rm=TRUE),
+	           `Weeks Enrolled`=sum(Duration, na.rm=TRUE),
+	           Duration=elapsed(Start,
+			                    Finish,
+								"years"),
+               Graduated=any(`Graduated?`, na.rm=TRUE)) %>%
+     ungroup() %>%
+     mutate(`Years Ago`=elapsed(Start,
+                                lubridate::today(),
+								"years"))
+
+nsc_sequences <- left_join(nsc_sequences,
+                           schools %>% 
+                           select(`College Code/Branch`,
+                                  Institution,
+								  `2-year / 4-year`,
+								  `Public / Private`)) %>%
+                 mutate(`Possibly Active`=`Years Ago` < 1.5 * `2-year / 4-year`,
+                        `2-year / 4-year`=factor(`2-year / 4-year`,
+                                                 labels=c("2-Year",
+                                                          "4-Year")),
+                        `Postsecondary Status`=ifelse(Graduated,
+						                              "Graduated",
+													  ifelse(`Possibly Active`,
+													         "Within Graduation Window",
+															 "Past Graduation Window")))
+
+student_outcomes <- left_join(nsc_sequences,
+                              students) %>%
+                    group_by(ID,
+					         `College Sequence`,
+							 Institution,
+					         `2-year / 4-year`) %>%
+                    summarize(`Postsecondary Status`=student_status(Graduated,
+                                                                    `Possibly Active`),
+	                          `Final Date`=max(Finish, na.rm=TRUE)) %>%
+	                mutate(`Final Year`=lubridate::year(`Final Date`))
+
+```
+
+```{r postsecondary-status-by-school-type, echo=FALSE, out.width="75%", fig.width=6, fig.asp=0.618, fig.align="center"}
+
+outcomes_by_school_type <- student_outcomes %>%
+    group_by(`Postsecondary Status`,
+	         `2-year / 4-year`,
+              .drop=FALSE) %>%
+    summarize(Count=n()) %>%
+	ungroup()
+
+ggplot(outcomes_by_school_type,
+       aes(Count,
+           `2-year / 4-year`,
+           fill=`Postsecondary Status`)) +
+    geom_col(position=position_dodge(preserve="single")) +
+	geom_text(aes(x=Count/2, label=ifelse(Count, Count, "")),
+              position=position_dodge(width=0.9),
+			  color=HEx_colors[["Gold"]],
+              fontface="bold") +
+    scale_fill_discrete(type=as.character(HEx_colors[3:5])) +
+    labs(x="Number of Students",
+	     y="Type of School",
+         fill="Post-Secondary Status")
+
+```
+
+```{r postsecondary-status-by-institution, echo=FALSE, out.width="75%", fig.width=6, fig.asp=0.618, fig.align="center"}
+
+
+outcomes_by_institution <- student_outcomes %>%
+    group_by(`Postsecondary Status`,
+	         Institution,
+              .drop=FALSE) %>%
+    summarize(Count=n()) %>%
+	ungroup()
+
+ggplot(outcomes_by_institution,
+       aes(Count,
+           Institution,
+           fill=`Postsecondary Status`)) +
+    geom_col(position=position_dodge(preserve="single")) +
+	geom_text(aes(x=Count/2, label=ifelse(Count, Count, "")),
+              position=position_dodge(width=0.9),
+			  color=HEx_colors[["Gold"]],
+              fontface="bold") +
+    scale_fill_discrete(type=as.character(HEx_colors[3:5])) +
+    labs(x="Number of Students",
+	     y="Institution",
+         fill="Post-Secondary Status")
+
+```
+
+```{r gap-time, echo=FALSE, out.width="75%", fig.width=6, fig.asp=0.618, fig.align="center"}
+
+ggplot(nsc_sequences, aes(`Gap Time`, fill=`Postsecondary Status`)) +
+    geom_histogram(color="white", binwidth=1) +
+	scale_fill_discrete(type=as.character(HEx_colors[3:5])) +
+	scale_x_continuous(breaks=seq(-5, 5, 1)) +
+	labs(y="Number of Students",
+	     x="Years between Secondary and Post-Secondary",
+		 fill="Post-Secondary Status")
+
+```
+
+
+```{r sequence-duration, echo=FALSE, out.width="75%", fig.width=6, fig.asp=0.618, fig.align="center"}
+
+ggplot(nsc_sequences, aes(`Duration`, fill=`Postsecondary Status`)) +
+    geom_histogram(color="white", binwidth=1/4) +
+	scale_fill_discrete(type=as.character(HEx_colors[3:5])) +
+	labs(y="Number of Students",
+	     x="Years in Post-Secondary Study",
+		 fill="Post-Secondary Status")
+
+```
+
+```{r weeks-enrolled, echo=FALSE, out.width="75%", fig.width=6, fig.asp=0.618, fig.align="center"}
+
+ggplot(nsc_sequences, aes(`Weeks Enrolled`, fill=`Postsecondary Status`)) +
+    geom_histogram(color="white", binwidth=12.5) +
+	scale_fill_discrete(type=as.character(HEx_colors[3:5])) +
+	labs(y="Number of Students",
+	     x="Total Weeks Enrolled in Post-Secondary Study",
+		 fill="Post-Secondary Status")
+
+
+```
+
+```{r trends-in-status-groups, echo=FALSE, out.width="75%", fig.width=6, fig.asp=0.618, fig.align="center"}
+
+anos <- student_outcomes %>%
+    group_by(`Postsecondary Status`,
+			 `Final Year`) %>%
+	summarize(Count=n())
+
+ggplot(anos,
+       aes(`Final Year`,
+	       Count,
+		   color=`Postsecondary Status`)) +
+    geom_line(size=2) +
+	scale_color_discrete(type=as.character(HEx_colors[3:5])) +
+	theme(legend.position=c(0.2, 0.8))
+
+```
